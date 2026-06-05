@@ -8,13 +8,11 @@ import time
 # --- 1. 앱 설정 및 세션 상태 초기화 ---
 st.set_page_config(page_title="고등학교 교육과정 정밀 점검 시스템", layout="wide")
 
-# 세션 상태 변수 초기화 (분석 결과 보존용)
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = None
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-# 초기화 함수들
 def reset_all():
     st.session_state.analysis_results = None
     st.session_state.uploader_key += 1
@@ -37,19 +35,21 @@ SYSTEM_INSTRUCTION = f"""
 당신은 대한민국 고등학교 교육과정 전문가입니다. 제공된 엑셀 데이터를 바탕으로 아래 17개 항목을 점검하세요.
 항목명: {", ".join(CHECK_ITEMS)}
 
-[응답 규칙]
-1. 각 항목에 대해 '판정(O/X/△)'과 '상세근거'를 반드시 분리하여 응답하세요.
-2. 판정은 기호만, 근거는 엑셀 데이터에 기반한 구체적인 수치나 이유를 작성하세요.
-3. 반드시 아래 JSON 형식으로만 응답하세요. 다른 설명은 하지 마세요.
+[응답 및 점검 규칙]
+1. 16번 과목명 정확성 점검 시, 과목명 뒤에 붙은 공백(Space)으로 인한 차이는 오류로 간주하지 마세요.
+2. 각 항목에 대해 '판정(O/X/△)'과 '상세근거'를 반드시 분리하여 응답하세요.
+3. 근거는 엑셀 데이터에 기반한 구체적인 수치나 이유를 작성하세요.
+4. 마지막으로 학교의 전체적인 교육과정 구성을 총평하고 보완할 점을 '종합의견'에 구체적으로 작성하세요.
+5. 반드시 아래 JSON 형식으로만 응답하세요. 다른 설명은 하지 마세요.
 
 [응답 JSON 형식]
 {{
     "학교명": "학교이름",
     "점검리포트": [
         {{ "항목": "1.총이수학점(192이상)", "판정": "O", "상세근거": "총 192학점 편성 확인됨" }},
-        ... (17개 항목 모두 포함)
+        ... (17개 항목 반복)
     ],
-    "종합의견": "전체적인 수정 및 개선 제언"
+    "종합의견": "이 학교의 교육과정은... (구체적인 개선사항 및 총평)"
 }}
 """
 
@@ -58,13 +58,11 @@ SYSTEM_INSTRUCTION = f"""
 def init_model(api_key):
     try:
         genai.configure(api_key=api_key)
-        # 가용한 모델 목록 확인
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # 1.5 flash 모델 우선 선택
         selected = 'models/gemini-1.5-flash' if 'models/gemini-1.5-flash' in available_models else available_models[0]
         return genai.GenerativeModel(model_name=selected, system_instruction=SYSTEM_INSTRUCTION)
     except Exception as e:
-        st.error(f"모델 초기화 중 오류: {e}")
+        st.error(f"모델 초기화 오류: {e}")
         return None
 
 def analyze_excel(model, file):
@@ -75,8 +73,6 @@ def analyze_excel(model, file):
             content += f"\n[시트: {name}]\n{df.to_csv(index=False)}"
         
         response = model.generate_content(f"파일명: {file.name}\n데이터:\n{content}")
-        
-        # AI 응답에서 JSON 추출 (마크다운 코드 블록 제거)
         res_text = response.text
         if "```json" in res_text:
             res_text = res_text.split("```json")[1].split("```")[0]
@@ -86,21 +82,25 @@ def analyze_excel(model, file):
         data = json.loads(res_text.strip())
         
         rows = []
+        school_name = data.get('학교명', '미확인')
+        improvement_note = data.get('종합의견', '의견 없음')
+        
         for item in data.get('점검리포트', []):
             rows.append({
-                "학교명": data.get('학교명', '미확인'),
+                "학교명": school_name,
                 "항목명": item.get('항목', '알 수 없음'),
                 "판정": item.get('판정', '-'),
-                "상세근거": item.get('상세근거', '근거 없음')
+                "상세근거": item.get('상세근거', '근거 없음'),
+                "종합개선사항": improvement_note # 엑셀 출력용
             })
-        return rows, data.get('종합의견', '의견 없음')
+        return rows, improvement_note
     except Exception as e:
         return None, str(e)
 
 # --- 4. 사용자 인터페이스 (UI) ---
 
 st.title("🏫 2027 고등학교 교육과정 정밀 점검 도구")
-st.caption("2022 개정 교육과정 지침 준수 여부를 분석하는 엑셀 기반 자동 점검 시스템입니다.")
+st.caption("2022 개정 교육과정 지침 준수 여부를 분석합니다. 과목명 뒤 공백은 무시하도록 설정되었습니다.")
 
 with st.sidebar:
     st.header("⚙️ 설정 및 도구")
@@ -111,7 +111,6 @@ with st.sidebar:
     if st.button("🧹 분석 결과만 삭제", use_container_width=True):
         reset_analysis()
 
-# 파일 업로드 (uploader_key를 사용하여 강제 초기화 가능)
 uploaded_files = st.file_uploader(
     "점검할 교육과정 엑셀 파일(.xlsx)을 업로드하세요", 
     type=['xlsx'], 
@@ -119,9 +118,7 @@ uploaded_files = st.file_uploader(
     key=f"uploader_{st.session_state.uploader_key}"
 )
 
-# 분석 실행 버튼
 if api_key_input and uploaded_files:
-    # color="primary"를 type="primary"로 수정하여 TypeError 해결
     if st.button("🔍 점검 시작", type="primary", use_container_width=True):
         model = init_model(api_key_input)
         if model:
@@ -134,17 +131,16 @@ if api_key_input and uploaded_files:
                 if rows:
                     all_data_rows.extend(rows)
                 else:
-                    st.error(f"{file.name} 분석 중 오류 발생: {opinion}")
+                    st.error(f"{file.name} 분석 실패: {opinion}")
                 
                 progress_bar.progress((idx + 1) / len(uploaded_files))
-                # 무료 할당량(RPM)을 고려한 대기
                 if idx < len(uploaded_files) - 1:
                     time.sleep(12)
             
             if all_data_rows:
                 st.session_state.analysis_results = pd.DataFrame(all_data_rows)
                 st.success("✅ 모든 분석이 완료되었습니다!")
-                st.rerun() # 결과 표시를 위해 앱 재실행
+                st.rerun()
 
 # --- 5. 결과 표시 영역 ---
 
@@ -152,19 +148,21 @@ if st.session_state.analysis_results is not None:
     st.divider()
     res_df = st.session_state.analysis_results
     
-    st.subheader("📊 학교별 점검 결과 확인")
+    st.subheader("📊 학교별 점검 결과")
     
-    # 여러 학교 분석 시 선택 필터
     unique_schools = res_df['학교명'].unique()
     selected_school = st.selectbox("보고서를 확인할 학교를 선택하세요", unique_schools)
     
-    # 선택된 학교의 데이터만 필터링
     school_df = res_df[res_df['학교명'] == selected_school].reset_index(drop=True)
     
-    # 결과 테이블 (항목명, 판정, 상세근거 분리 표시)
+    # 1. 종합 개선사항 강조 표시
+    improvement_text = school_df['종합개선사항'].iloc[0]
+    st.info(f"💡 **{selected_school} 종합 개선 의견 및 총평**\n\n{improvement_text}")
+    
+    # 2. 항목별 점검 테이블
     st.table(school_df[['항목명', '판정', '상세근거']])
 
-    # 엑셀 다운로드 (모든 분석 결과 포함)
+    # 3. 엑셀 다운로드 (개선사항 포함)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         res_df.to_excel(writer, index=False, sheet_name='통합점검결과')
@@ -181,4 +179,4 @@ else:
     if not api_key_input:
         st.warning("👈 사이드바에 API 키를 입력해 주세요.")
     elif not uploaded_files:
-        st.info("📂 점검할 엑셀 파일을 업로드한 후 '점검 시작' 버튼을 눌러주세요.")
+        st.info("📂 엑셀 파일을 업로드한 후 '점검 시작' 버튼을 눌러주세요.")
