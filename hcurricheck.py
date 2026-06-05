@@ -6,7 +6,7 @@ import io
 import time
 
 # --- 1. 앱 설정 및 세션 상태 초기화 ---
-st.set_page_config(page_title="고등학교 교육과정 정밀 점검 시스템", layout="wide")
+st.set_page_config(page_title="고등학교 교육과정 점검 도우미", layout="wide")
 
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = None
@@ -99,8 +99,8 @@ def analyze_excel(model, file):
 
 # --- 4. 사용자 인터페이스 (UI) ---
 
-st.title("🏫 2027 고등학교 교육과정 정밀 점검 도구")
-st.caption("2022 개정 교육과정 지침 준수 여부를 분석합니다. 과목명 뒤 공백은 무시하도록 설정되었습니다.")
+st.title("🏫 2027 고등학교 교육과정 점검 도우미")
+st.caption("2022 개정 교육과정 지침 준수 여부를 분석합니다.")
 
 with st.sidebar:
     st.header("⚙️ 설정 및 도구")
@@ -112,7 +112,7 @@ with st.sidebar:
         reset_analysis()
 
 uploaded_files = st.file_uploader(
-    "점검할 교육과정 엑셀 파일(.xlsx)을 업로드하세요", 
+    "점검할 학교의 교육과정 엑셀 파일(.xlsx)을 업로드하세요", 
     type=['xlsx'], 
     accept_multiple_files=True,
     key=f"uploader_{st.session_state.uploader_key}"
