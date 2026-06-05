@@ -4,6 +4,7 @@ import pandas as pd
 import json
 import io
 import time
+import re # 정규표현식 추가
 
 # --- 1. 앱 설정 및 세션 상태 초기화 ---
 st.set_page_config(page_title="고등학교 교육과정 점검 도우미", layout="wide")
@@ -38,19 +39,8 @@ SYSTEM_INSTRUCTION = f"""
 [응답 및 점검 규칙]
 1. 16번 과목명 정확성 점검 시, 과목명 뒤에 붙은 공백(Space)으로 인한 차이는 오류로 간주하지 마세요.
 2. 각 항목에 대해 '판정(O/X/△)'과 '상세근거'를 반드시 분리하여 응답하세요.
-3. 근거는 엑셀 데이터에 기반한 구체적인 수치나 이유를 작성하세요.
-4. 마지막으로 학교의 전체적인 교육과정 구성을 총평하고 보완할 점을 '종합의견'에 구체적으로 작성하세요.
-5. 반드시 아래 JSON 형식으로만 응답하세요. 다른 설명은 하지 마세요.
-
-[응답 JSON 형식]
-{{
-    "학교명": "학교이름",
-    "점검리포트": [
-        {{ "항목": "1.총이수학점(192이상)", "판정": "O", "상세근거": "총 192학점 편성 확인됨" }},
-        ... (17개 항목 반복)
-    ],
-    "종합의견": "이 학교의 교육과정은... (구체적인 개선사항 및 총평)"
-}}
+3. 종합의견은 학교의 전체적인 구성을 총평하고 보완점을 구체적으로 작성하세요.
+4. 반드시 유효한 JSON 형식으로만 응답하세요. 문자열 내부에 실제 줄바꿈(Enter)을 넣지 말고 필요하면 '\\n' 문자를 사용하세요.
 """
 
 # --- 3. 모델 및 분석 함수 ---
@@ -74,12 +64,16 @@ def analyze_excel(model, file):
         
         response = model.generate_content(f"파일명: {file.name}\n데이터:\n{content}")
         res_text = response.text
-        if "```json" in res_text:
-            res_text = res_text.split("```json")[1].split("```")[0]
-        elif "```" in res_text:
-            res_text = res_text.split("```")[1].split("```")[0]
-            
-        data = json.loads(res_text.strip())
+        
+        # 1. 마크다운 코드 블록 제거
+        res_text = re.sub(r'```json\s*|```', '', res_text).strip()
+        
+        # 2. 제어 문자 제거 (JSON 파싱 에러의 주원인)
+        # \x00-\x1f 범위의 제어 문자를 제거하되, 공백(space)은 유지
+        res_text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', res_text)
+
+        # 3. JSON 파싱 (strict=False 설정을 통해 비표준 제어 문자 허용)
+        data = json.loads(res_text, strict=False)
         
         rows = []
         school_name = data.get('학교명', '미확인')
@@ -91,16 +85,18 @@ def analyze_excel(model, file):
                 "항목명": item.get('항목', '알 수 없음'),
                 "판정": item.get('판정', '-'),
                 "상세근거": item.get('상세근거', '근거 없음'),
-                "종합개선사항": improvement_note # 엑셀 출력용
+                "종합개선사항": improvement_note
             })
         return rows, improvement_note
+    except json.JSONDecodeError as je:
+        return None, f"JSON 파싱 실패: {je}\nAI 응답 원문 일부: {res_text[:100]}..."
     except Exception as e:
         return None, str(e)
 
 # --- 4. 사용자 인터페이스 (UI) ---
 
-st.title("🏫 2027 고등학교 교육과정 점검 도우미")
-st.caption("2022 개정 교육과정 지침 준수 여부를 분석합니다.")
+st.title("🏫 2027 고등학교 교육과정 정밀 점검 도구")
+st.caption("데이터 정제 로직이 강화되었습니다.")
 
 with st.sidebar:
     st.header("⚙️ 설정 및 도구")
@@ -112,7 +108,7 @@ with st.sidebar:
         reset_analysis()
 
 uploaded_files = st.file_uploader(
-    "점검할 학교의 교육과정 엑셀 파일(.xlsx)을 업로드하세요", 
+    "점검할 교육과정 엑셀 파일(.xlsx)을 업로드하세요", 
     type=['xlsx'], 
     accept_multiple_files=True,
     key=f"uploader_{st.session_state.uploader_key}"
@@ -148,21 +144,19 @@ if st.session_state.analysis_results is not None:
     st.divider()
     res_df = st.session_state.analysis_results
     
-    st.subheader("📊 학교별 점검 결과")
-    
     unique_schools = res_df['학교명'].unique()
     selected_school = st.selectbox("보고서를 확인할 학교를 선택하세요", unique_schools)
     
     school_df = res_df[res_df['학교명'] == selected_school].reset_index(drop=True)
     
-    # 1. 종합 개선사항 강조 표시
+    # 종합 개선사항 표시
     improvement_text = school_df['종합개선사항'].iloc[0]
     st.info(f"💡 **{selected_school} 종합 개선 의견 및 총평**\n\n{improvement_text}")
     
-    # 2. 항목별 점검 테이블
+    # 항목별 점검 테이블
     st.table(school_df[['항목명', '판정', '상세근거']])
 
-    # 3. 엑셀 다운로드 (개선사항 포함)
+    # 엑셀 다운로드
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         res_df.to_excel(writer, index=False, sheet_name='통합점검결과')
@@ -174,9 +168,3 @@ if st.session_state.analysis_results is not None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
-    
-else:
-    if not api_key_input:
-        st.warning("👈 사이드바에 API 키를 입력해 주세요.")
-    elif not uploaded_files:
-        st.info("📂 엑셀 파일을 업로드한 후 '점검 시작' 버튼을 눌러주세요.")
