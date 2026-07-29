@@ -5,40 +5,50 @@ import json
 import io
 import time
 
-# --- [중요] 계산 로직 강화를 위한 시스템 프롬프트 수정 ---
+# --- 1. 앱 설정 및 세션 상태 초기화 (가장 먼저 실행되어야 함) ---
+st.set_page_config(page_title="고등학교 교육과정 정밀 점검 시스템", layout="wide")
+
+# 세션 상태 초기화 로직 (오류 방지)
+if 'analysis_data' not in st.session_state:
+    st.session_state.analysis_data = []
+if 'uploader_key' not in st.session_state:
+    st.session_state.uploader_key = 0
+
+def reset_all():
+    st.session_state.analysis_data = []
+    st.session_state.uploader_key += 1
+    st.rerun()
+
+# --- 2. 점검 지침 정의 (계산 로직 강화 버전) ---
+
 CALCULATION_LOGIC = """
-[학점 계산 필수 규칙]
-1. 학기별 총 이수 학점 계산식:
-   - 해당 학기 총 학점 = (학교 지정 과목 학점 합계) + (선택 과목 배정 학점 합계) + (창의적 체험활동 학점)
-2. 선택 과목 학점 추출:
-   - '학점(택O)' 또는 '학점/(택O)' 형식에서, 괄호 앞의 숫자(X)가 해당 학기 학생이 이수하게 되는 '배정 학점'임.
-   - 예: '4(택1)' -> 4학점 합산 / '12(택3)' -> 12학점 합산. (괄호 안의 숫자는 무시)
-3. 창의적 체험활동(창체) 합산:
-   - 시트 하단에 별도로 기재된 '창의적 체험활동', '자율/동아리/봉사/진로' 등의 학점(보통 학기당 3학점 내외)을 반드시 찾아내어 각 학기 총점에 합산할 것.
-4. 학기 단위 완결성 점검:
-   - 1학년 1학기부터 3학년 2학기까지 각 학기별 총합이 32학점(총 192학점 기준)이 되는지 확인.
-   - 학기 간 학점 편차가 5학점 이상 벌어지면 'X' 판정.
+[학점 계산 및 검증 핵심 지침]
+1. 학기별 총합 계산: (학교 지정 과목 학점) + (선택 과목 배정 학점) + (창의적 체험활동 학점)을 모두 더해야 함.
+2. 선택 과목 처리: '12(택3)' 또는 '4(택1)'와 같은 형식에서 괄호 앞의 숫자(12 또는 4)가 그 학기에 학생이 이수하는 총 학점이므로 이 숫자를 합산에 사용함.
+3. 창의적 체험활동(창체): 시트 하단에 있는 창체 학점(자율, 동아리, 봉사, 진로 등)을 반드시 찾아내어 매 학기 합계에 포함할 것 (보통 학기당 3학점).
+4. 위계성 점검: 로마자(I, II)가 포함된 과목만 선이수 관계를 확인 (예: 물리학I -> 물리학II). '공통수학1, 2'나 '한국사1, 2'는 제외.
 """
 
 GENERAL_RULES = f"""
-[일반 지침]
-1.총이수학점(192이상), 2.필수이수학점(84이상), 3.학기단위완결성(학기별 합계 계산 주의), 
-4.공통과목우선편성, 5.과목위계성(로마자 Ⅰ, Ⅱ 과목 대상), 
-6.학기간학점균형(격차5이내), 7.초과이수적정성, 8.과목별학점범위준수, 
-9.교과군별필수충족, 10.2022개정과목사용, 11.국수영총합(81이내), 12.한국사(각3학점), 
-13.체육(10학점이상/매학기), 14.종교과목선택권, 15.동일과목동일학점, 16.과목명확성, 
-17.기록형식준수
 {CALCULATION_LOGIC}
+[일반 지침]
+1.총이수학점(192이상), 2.필수이수학점(84이상), 3.학기단위완결성(학기별 32학점 권장), 
+4.공통과목우선편성, 5.과목위계성, 6.학기간학점균형(격차5이내), 7.초과이수적정성, 
+8.과목별학점범위준수, 9.교과군별필수충족, 10.2022개정과목사용, 11.국수영총합(81이내), 
+12.한국사(각3학점), 13.체육(10학점이상/매학기), 14.종교과목선택권, 15.동일과목동일학점, 
+16.과목명확성, 17.기록형식준수
 """
 
 SCIENCE_CORE_RULES = """
 [과학중점학교 추가 지침]
 18.1학년과정: 과학/탐구실험 10학점 편성
-19.과학선택과목: 물/화/생/지 I, II 전과목 개설 및 선택권 보장
+19.과학선택과목: 물/화/생/지 I, II 전과목 개설
 20.수학선택과목: 미적분II, 기하 등 심화과목 편성
 21.정보교과: 정보 및 AI 관련 과목 필수 편성
 22.융합과목: 과학/수학 융합 선택 과목 편성
 """
+
+# --- 3. 모델 설정 함수 ---
 
 def get_model(api_key, school_type):
     genai.configure(api_key=api_key)
@@ -47,53 +57,35 @@ def get_model(api_key, school_type):
         rules += "\n" + SCIENCE_CORE_RULES
     
     instruction = f"""
-    당신은 대한민국 고등학교 교육과정 편성표 분석 전문가입니다. 
-    제시된 엑셀 데이터는 '학교 지정' 영역과 '학생 선택' 영역, 그리고 '창의적 체험활동' 영역으로 나뉩니다.
-    
-    {rules}
+    당신은 대한민국 고등학교 교육과정 전문가입니다. 
+    제공된 엑셀 데이터를 분석하여 점검 리포트를 JSON 형식으로 작성하세요.
+    특히 학기별 이수 학점 계산 시 '학교 지정', '선택 과목 학점', '창의적 체험활동'을 모두 합산해야 함을 명심하세요.
     
     [응답 규칙]
-    - JSON 형식으로만 응답하세요.
-    - '상세근거' 작성 시, 계산된 학기별 합계를 반드시 명시하세요. (예: 1-1학기: 지정(22)+선택(7)+창체(3)=32학점)
-    - JSON: {{"학교명": "", "점검리포트": [{{"항목": "", "판정": "", "상세근거": ""}}], "종합의견": ""}}
+    - '상세근거'에 계산식 포함 (예: 지정(22)+선택(7)+창체(3)=32)
+    - JSON 형식: {{"학교명": "", "점검리포트": [{{"항목": "", "판정": "", "상세근거": ""}}], "종합의견": ""}}
     """
     
-    available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    target = next((t for t in ['models/gemini-1.5-flash', 'gemini-1.5-flash'] if t in available), available[0])
-    return genai.GenerativeModel(model_name=target, system_instruction=instruction)
+    # 모델 선택 (안정적인 버전 우선)
+    return genai.GenerativeModel(model_name='gemini-1.5-flash', system_instruction=instruction)
 
-# --- 4. 분석 실행 함수 (데이터 전처리 강화) ---
+# --- 4. 분석 실행 함수 ---
 
 def analyze_excel(model, file):
     try:
-        # 모든 시트를 읽어서 텍스트화
         all_sheets = pd.read_excel(file, sheet_name=None)
         content = ""
         for name, df in all_sheets.items():
-            # 결측치를 0이나 빈 문자열로 처리하여 AI가 혼동하지 않게 함
             df_cleaned = df.fillna("")
-            content += f"\n### 시트명: {name} ###\n{df_cleaned.to_csv(index=False)}\n"
+            content += f"\n[시트: {name}]\n{df_cleaned.to_csv(index=False)}\n"
         
-        # AI에게 데이터 전달
-        prompt = f"""
-        파일명: {file.name}
-        아래 데이터에서 학기별 학점을 계산하여 점검 리포트를 작성하세요.
-        선택 과목의 'X(택Y)' 형식에서 X를 해당 학점 합계에 포함하는 것을 잊지 마세요.
-        시트 하단의 '창의적 체험활동' 학점을 반드시 찾아내어 합산하세요.
-        
-        데이터:
-        {content}
-        """
-        
-        response = model.generate_content(prompt)
+        response = model.generate_content(f"파일명: {file.name}\n데이터:\n{content}")
         clean_text = response.text.replace('```json', '').replace('```', '').strip()
         return json.loads(clean_text)
     except Exception as e:
         return {"오류": str(e)}
 
 # --- 5. UI 구성 ---
-
-st.title("🏫 고등학교 교육과정 정밀 점검 시스템")
 
 with st.sidebar:
     st.header("⚙️ 설정")
@@ -102,7 +94,11 @@ with st.sidebar:
     st.divider()
     if st.button("🔄 전체 초기화"): reset_all()
 
-uploaded_files = st.file_uploader("엑셀 파일(.xlsx) 업로드", type=['xlsx'], accept_multiple_files=True, key=f"u_{st.session_state.uploader_key}")
+st.title("🏫 고등학교 교육과정 정밀 점검 시스템")
+
+# uploader_key를 안전하게 사용
+u_key = f"uploader_{st.session_state.get('uploader_key', 0)}"
+uploaded_files = st.file_uploader("엑셀 파일(.xlsx) 업로드", type=['xlsx'], accept_multiple_files=True, key=u_key)
 
 if api_key and uploaded_files:
     model = get_model(api_key, school_type)
@@ -112,7 +108,7 @@ if api_key and uploaded_files:
         progress_bar = st.progress(0)
         
         for idx, file in enumerate(uploaded_files):
-            st.write(f"⏳ {file.name} ({school_type}) 분석 중...")
+            st.write(f"⏳ {file.name} 분석 중...")
             result = analyze_excel(model, file)
             if "학교명" in result:
                 st.session_state.analysis_data.append(result)
@@ -120,8 +116,8 @@ if api_key and uploaded_files:
                 st.error(f"{file.name} 분석 실패: {result.get('오류')}")
             
             progress_bar.progress((idx + 1) / len(uploaded_files))
-            time.sleep(12)
-        st.success("점검 완료!")
+            time.sleep(1) # API 호출 간격 조절
+        st.success("모든 학교 점검 완료!")
 
 # --- 6. 결과 전시 및 내보내기 ---
 
