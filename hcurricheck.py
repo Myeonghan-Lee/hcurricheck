@@ -4,6 +4,7 @@ import pandas as pd
 import json
 import io
 import time
+from fpdf import FPDF
 
 # --- 1. 앱 설정 및 세션 상태 초기화 ---
 st.set_page_config(page_title="고등학교 교육과정 정밀 점검 시스템", layout="wide")
@@ -18,169 +19,148 @@ def reset_all():
     st.session_state.uploader_key += 1
     st.rerun()
 
-# --- 2. 점검 지침 정의 (계산 로직 고도화) ---
+# --- 2. 점검 지침 정의 (요구사항 반영) ---
 
 CALCULATION_LOGIC = """
-[학점 계산 및 검증 핵심 지침 - 매우 중요]
-1. 학기별 총 이수 학점 계산: 
-   - (학교 지정 과목 학점 합계) + (선택 과목 배정 학점 합계) + (창의적 체험활동 학점)을 모두 합산해야 함.
-2. 선택 과목 학점 추출: 
-   - '12(택3)'와 같은 형식에서 괄호 앞의 숫자 '12'가 해당 학기 배정 학점이므로 이를 합계에 사용함. 괄호 안의 숫자는 무시함.
-3. 창의적 체험활동(창체): 
-   - 시트 하단에 별도로 기재된 '창의적 체험활동', '자율/동아리/봉사/진로' 등의 학점을 반드시 찾아내어 각 학기 합계에 합산함. (보통 학기당 3학점 내외)
-4. 결과 출력: 상세근거에 "1-1학기: 지정(22)+선택(7)+창체(3)=32학점"과 같이 계산 과정을 명시함.
+[학점 계산 및 검증 핵심 지침]
+1. [x] 제외 규칙: 학점 칸에 대괄호가 있는 숫자(예: [2], [4])는 반별 교차 편성 등을 의미하므로 합계 계산 시 0으로 처리하고 절대 합산하지 마시오.
+2. 학기별 총합: (학교 지정 과목 학점) + (선택 과목 배정 학점 X) + (창의적 체험활동 학점)을 합산. 
+   - 선택 과목의 '12(택3)' 형식에서 괄호 앞의 숫자 12를 사용.
+3. 필수 이수학점 정밀 체크:
+   - 국어(10), 수학(10), 영어(10), 사회(10), 과학(12), 체육(10), 예술(10) 학점 확인.
+   - 기술·가정/정보/제2외국어/한문/교양 교과군: 이들 과목의 합계가 최소 16학점 이상이어야 함.
+   - 중요: '학교 지정' 학점만으로 부족할 경우, 해당 교과군 내의 '학생 선택' 과목(필수 선택 그룹 등)을 찾아 합산하여 충족 여부를 판단할 것.
+4. 결과 출력: 상세근거에 "1-1학기: 지정(22)+선택(7)+창체(3)=32 / [2] 제외됨" 과 같이 명시.
 """
 
 GENERAL_RULES = f"""
 {CALCULATION_LOGIC}
 [일반 지침]
-1.총이수학점(192이상), 2.필수이수학점(84이상), 3.학기단위완결성(학기별 합계 확인), 
-4.공통과목우선편성, 5.과목위계성(로마자 I, II 과목만 해당), 6.학기간학점균형(격차5이내), 
-7.초과이수적정성, 8.과목별학점범위준수, 9.교과군별필수충족, 10.2022개정과목사용, 
-11.국수영총합(81이내), 12.한국사(각3학점), 13.체육(10학점이상/매학기), 
-14.종교과목선택권, 15.동일과목동일학점, 16.과목명확성, 17.기록형식준수
+1.총이수학점(192이상), 2.필수이수학점(84이상), 3.학기단위완결성, 4.공통과목우선편성, 
+5.과목위계성(로마자 과목), 6.학기간학점균형(격차5), 7.초과이수적정성, 
+8.과목별학점범위, 9.교과군별필수충족(지정+선택 합산), 10.2022개정과목사용, 
+11.국수영총합(81이내), 12.한국사(각3학점), 13.체육(매학기 편성), 14.종교선택권
 """
 
-SCIENCE_CORE_RULES = """
-[과학중점학교 추가 지침]
-18.1학년과정: 과학 10학점 편성(통합과학8+과탐실2)
-19.과학선택과목: 물/화/생/지 I, II 8개 과목 개설 여부
-20.수학선택과목: 미적분II, 기하 등 심화과목 필수 편성
-21.정보교과: 정보 및 AI 관련 과목 편성
-22.융합과목: 과학/수학 융합 선택 과목 편성
-"""
+SCIENCE_CORE_RULES = "[과학중점학교 지침] 1학년 과학 10학점, 과학 8과목 이상, 수학/정보 심화 편성 필수."
 
-# --- 3. 모델 설정 함수 (404 에러 방지 로직) ---
+# --- 3. PDF 생성 함수 ---
+
+class PDF(FPDF):
+    def header(self):
+        # 한국어 폰트 설정 (폰트 파일이 실행 경로에 있어야 함. 여기서는 기본 폰트 사용 예시)
+        # 실제 환경에서는 NanumGothic.ttf 등을 추가해야 깨지지 않습니다.
+        try:
+            self.add_font('Nanum', '', 'NanumGothic.ttf') # 폰트 파일 필요
+            self.set_font('Nanum', '', 12)
+        except:
+            self.set_font('Helvetica', 'B', 12)
+        self.cell(0, 10, 'Curriculum Inspection Report', ln=True, align='C')
+        self.ln(5)
+
+def create_pdf(data_list, filename="report.pdf"):
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # 한국어 폰트 처리 (폰트 경로 주의)
+    # 폰트가 없는 환경을 위해 에러 처리를 하되, 실제 사용 시에는 반드시 ttf 파일을 넣으세요.
+    try:
+        # 이 코드 실행 경로에 NanumGothic.ttf가 있다고 가정하거나 아래 경로 수정
+        pdf.add_font("Nanum", "", "NanumGothic.ttf")
+        font_name = "Nanum"
+    except:
+        font_name = "Arial" # 한국어는 깨질 수 있음
+
+    for data in data_list:
+        pdf.add_page()
+        pdf.set_font(font_name, size=16)
+        pdf.cell(0, 10, f"점검 리포트: {data.get('학교명', 'Unknown')}", ln=True, align='C')
+        pdf.ln(10)
+        
+        pdf.set_font(font_name, size=10)
+        # 점검표 테이블
+        for item in data.get('점검리포트', []):
+            pdf.multi_cell(0, 8, f"[{item['항목']}] 판정: {item['판정']}\n근거: {item['상세근거']}\n", border=1)
+            pdf.ln(2)
+        
+        pdf.ln(5)
+        pdf.set_font(font_name, size=12)
+        pdf.multi_cell(0, 10, f"종합 의견:\n{data.get('종합의견', '')}", border=0)
+        
+    return pdf.output()
+
+# --- 4. 메인 로직 ---
 
 def get_model(api_key, school_type):
-    try:
-        genai.configure(api_key=api_key)
-        
-        # 사용 가능한 모델 리스트 확인
-        available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # flash 모델 우선 선택 (이름 형식 대응)
-        target_model = ""
-        for m in ["models/gemini-1.5-flash", "gemini-1.5-flash", "models/gemini-pro"]:
-            if m in available_models:
-                target_model = m
-                break
-        
-        if not target_model:
-            target_model = available_models[0] # 최후의 수단으로 첫 번째 모델 선택
-
-        rules = GENERAL_RULES
-        if school_type == "과학중점학교":
-            rules += "\n" + SCIENCE_CORE_RULES
-        
-        instruction = f"""
-        당신은 대한민국 고등학교 교육과정 전문가입니다. 
-        제공된 엑셀 데이터를 정밀 분석하여 점검 리포트를 JSON 형식으로 응답하세요.
-        {rules}
-        [응답 형식]
-        {{"학교명": "", "점검리포트": [{{"항목": "항목명", "판정": "O/X", "상세근거": ""}}], "종합의견": ""}}
-        """
-        
-        return genai.GenerativeModel(model_name=target_model, system_instruction=instruction)
-    except Exception as e:
-        st.error(f"모델 설정 중 오류 발생: {str(e)}")
-        return None
-
-# --- 4. 분석 실행 함수 ---
+    genai.configure(api_key=api_key)
+    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    target = next((m for m in ["models/gemini-1.5-flash", "gemini-1.5-flash"] if m in available_models), available_models[0])
+    
+    rules = GENERAL_RULES + (SCIENCE_CORE_RULES if school_type == "과학중점학교" else "")
+    instruction = f"고등학교 교육과정 전문가로서 JSON으로 응답하세요.\n{rules}\nJSON: {{\"학교명\": \"\", \"점검리포트\": [{{ \"항목\": \"\", \"판정\": \"\", \"상세근거\": \"\" }}], \"종합의견\": \"\"}}"
+    return genai.GenerativeModel(model_name=target, system_instruction=instruction)
 
 def analyze_excel(model, file):
-    try:
-        all_sheets = pd.read_excel(file, sheet_name=None)
-        content = ""
-        for name, df in all_sheets.items():
-            df_cleaned = df.fillna("") # NaN 값 제거
-            content += f"\n### 시트명: {name} ###\n{df_cleaned.to_csv(index=False)}\n"
-        
-        # 모델 호출 (프롬프트 전달)
-        response = model.generate_content(
-            f"파일명: {file.name}\n"
-            f"이 데이터에서 학기별 학점(지정+선택+창체)을 정확히 계산하여 리포트를 작성하세요.\n"
-            f"데이터:\n{content}"
-        )
-        
-        # JSON 파싱
-        clean_text = response.text.replace('```json', '').replace('```', '').strip()
-        return json.loads(clean_text)
-    except Exception as e:
-        return {"오류": f"분석 중 에러 발생: {str(e)}"}
+    all_sheets = pd.read_excel(file, sheet_name=None)
+    content = ""
+    for name, df in all_sheets.items():
+        content += f"\n[시트: {name}]\n{df.fillna('').to_csv(index=False)}"
+    
+    response = model.generate_content(f"파일명: {file.name}\n데이터:\n{content}")
+    return json.loads(response.text.replace('```json', '').replace('```', '').strip())
 
-# --- 5. UI 구성 ---
-
-st.title("🏫 고등학교 교육과정 정밀 점검 시스템")
+# --- 5. UI ---
 
 with st.sidebar:
     st.header("⚙️ 설정")
     api_key = st.text_input("Gemini API Key", type="password")
-    school_type = st.selectbox("학교 유형 선택", ["일반 고등학교", "과학중점학교"])
-    st.divider()
-    if st.button("🔄 전체 초기화"): reset_all()
+    school_type = st.selectbox("학교 유형", ["일반 고등학교", "과학중점학교"])
+    if st.button("🔄 초기화"): reset_all()
 
-# 세션 상태에서 안전하게 키 가져오기
-current_uploader_key = f"u_{st.session_state.get('uploader_key', 0)}"
-uploaded_files = st.file_uploader("엑셀 파일(.xlsx) 업로드", type=['xlsx'], accept_multiple_files=True, key=current_uploader_key)
+st.title("🏫 교육과정 정밀 점검 & PDF 리포트")
+
+u_key = f"u_{st.session_state.get('uploader_key', 0)}"
+uploaded_files = st.file_uploader("엑셀 파일 업로드", type=['xlsx'], accept_multiple_files=True, key=u_key)
 
 if api_key and uploaded_files:
     model = get_model(api_key, school_type)
     
-    if model and st.button("🔍 점검 시작", type="primary", use_container_width=True):
+    if st.button("🔍 점검 시작", type="primary"):
         st.session_state.analysis_data = []
-        progress_bar = st.progress(0)
-        
-        for idx, file in enumerate(uploaded_files):
-            st.write(f"⏳ {file.name} 분석 중... (지정+선택+창체 합산 수행 중)")
-            result = analyze_excel(model, file)
-            
-            if "학교명" in result:
+        for file in uploaded_files:
+            with st.spinner(f"{file.name} 분석 중..."):
+                result = analyze_excel(model, file)
                 st.session_state.analysis_data.append(result)
-            else:
-                st.error(f"{file.name} 분석 실패: {result.get('오류', '알 수 없는 오류')}")
-            
-            progress_bar.progress((idx + 1) / len(uploaded_files))
-            time.sleep(2) # rate limit 방지
-            
-        if st.session_state.analysis_data:
-            st.success("점검 완료!")
-
-# --- 6. 결과 전시 및 내보내기 ---
+        st.success("분석 완료!")
 
 if st.session_state.analysis_data:
     st.divider()
-    school_names = [d.get('학교명', '알 수 없는 학교') for d in st.session_state.analysis_data]
-    selected_school = st.selectbox("점검 결과 확인", school_names)
     
-    curr = next(d for d in st.session_state.analysis_data if d.get('학교명') == selected_school)
-    
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.subheader(f"📊 {selected_school} 점검표")
-        st.table(pd.DataFrame(curr['점검리포트']))
-    with col2:
-        st.subheader("💡 종합 개선 사항")
-        st.info(curr['종합의견'])
-
-    # 엑셀 다운로드 파일 생성
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        final_list = []
-        for data in st.session_state.analysis_data:
-            final_list.append(["학교명", data.get('학교명', ''), ""])
-            final_list.append(["항목명", "판정", "상세근거"])
-            for item in data.get('점검리포트', []):
-                final_list.append([item.get('항목', ''), item.get('판정', ''), item.get('상세근거', '')])
-            final_list.append(["종합개선사항", "", data.get('종합의견', '')])
-            final_list.append(["", "", ""]) 
+    # 1. 개별 파일 결과 확인 및 PDF 다운로드
+    for idx, data in enumerate(st.session_state.analysis_data):
+        with st.expander(f"📄 {data['학교명']} 결과 보기"):
+            st.table(pd.DataFrame(data['점검리포트']))
+            st.info(data['종합의견'])
             
-        pd.DataFrame(final_list).to_excel(writer, index=False, header=False, sheet_name='점검결과')
+            # 개별 PDF 생성
+            individual_pdf = create_pdf([data])
+            st.download_button(
+                label=f"📥 {data['학교명']} 리포트(PDF)",
+                data=individual_pdf,
+                file_name=f"{data['학교명']}_점검결과.pdf",
+                mime="application/pdf",
+                key=f"dl_{idx}"
+            )
+
+    st.divider()
     
+    # 2. 통합 PDF 다운로드
+    all_pdf = create_pdf(st.session_state.analysis_data)
     st.download_button(
-        label="📥 점검 결과 보고서(Excel) 다운로드",
-        data=output.getvalue(),
-        file_name=f"교육과정_점검보고서_{school_type}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True
+        label="📥 모든 학교 통합 리포트(PDF) 다운로드",
+        data=all_pdf,
+        file_name="전체_교육과정_점검보고서.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+        type="primary"
     )
